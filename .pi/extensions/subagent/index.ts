@@ -8,7 +8,6 @@ import {
   type SubCoderResult,
 } from "./spawn.ts";
 import { SubCoderTracker } from "./tracker.ts";
-import { truncateLineToWidth } from "../_shared/width.ts";
 
 // The `dispatch` tool: the main little-coder spawns isolated child little-coder
 // sessions ("sub-coders") to research a focused question — they read the repo
@@ -191,22 +190,106 @@ export default function (pi: ExtensionAPI) {
   });
 }
 
-/** A minimal pi-tui Component backed by precomputed lines.
+/**
+ * Sanitize and wrap lines for the dispatch tool-result panel.
  *
- * pi paints custom tool-result panels with a 1-char left margin + background-
- * frame fill, so any line we hand back that's wider than `width - 1` overflows
- * the terminal and crashes pi-tui (issue #51 / reopen of #48 — the dispatch
- * renderer fed an unbounded sub-coder report sentence into the panel, and on
- * `--resume` the same renderer paints session history, so the crash recurred
- * even after v1.9.2 capped the *live* tracker). We respect the pi-supplied
- * `width` here and truncate every line to `width - 2`, leaving a 2-char
- * safety margin so wide unicode chars in the report can't sneak past our
- * char-count-based visibleWidth approximation. */
+ * Two problems we solve:
+ * 1. Long whitespace-free tokens (URLs, file paths, base64) are broken up
+ *    so word-wrap has somewhere to split — follows openclaw-cn's
+ *    tui-formatters.ts sanitizer (commit 8c822da).
+ * 2. Each line is wrapped to the pi-supplied width so no rendered line
+ *    exceeds the terminal — the failure mode of issues #48 / #51 (a 134-char
+ *    sub-coder report sentence + pi's 1-char panel left margin overflowed
+ *    pi-tui's strict line-width check, including on `--resume` because the
+ *    same renderer paints session history).
+ *
+ * Word-wrap was contributed by @steverhoades in PR #49; v1.9.5 cherry-picked
+ * it onto v1.9.4 because wrapping is a strictly better UX for markdown
+ * report bodies than the truncate-with-ellipsis we shipped in v1.9.4 — the
+ * user sees the whole sentence across multiple lines instead of a cut-off
+ * tail. The 2-char safety margin (`width - 2`) survives wide-unicode chars
+ * our char-count-based stripAnsi/length undercounts, and absorbs pi's panel
+ * frame margin so the rendered output still fits.
+ *
+ * pi-tui's own visibleWidth / truncateToWidth aren't importable here (pi
+ * 0.79 stopped hoisting pi-tui for extensions), so the ANSI-aware helpers
+ * are inlined.
+ */
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const MAX_TOKEN_CHARS = 32;
+const LONG_TOKEN_RE = /\S{33,}/g;
+
+function chunkToken(token: string): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < token.length; i += MAX_TOKEN_CHARS) {
+    chunks.push(token.slice(i, i + MAX_TOKEN_CHARS));
+  }
+  return chunks;
+}
+
+function sanitizeLongTokens(text: string): string {
+  return LONG_TOKEN_RE.test(text)
+    ? text.replace(LONG_TOKEN_RE, (token) => chunkToken(token).join(" "))
+    : text;
+}
+
+/** Extract leading ANSI SGR codes so wrapped lines can re-apply them. */
+function extractAnsiPrefix(text: string): { prefix: string; rest: string } {
+  let end = 0;
+  while (end < text.length && text.slice(end, end + 2) === "\x1b[") {
+    const mPos = text.indexOf("m", end + 2);
+    if (mPos === -1) break;
+    end = mPos + 1;
+  }
+  return { prefix: text.slice(0, end), rest: text.slice(end) };
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, "");
+}
+
+/** Word-wrap plain text at whitespace; assumes long tokens are pre-chunked. */
+function wrapPlainText(text: string, maxWidth: number): string[] {
+  if (text.length <= maxWidth) return [text];
+  const words = text.split(/\s+/);
+  const result: string[] = [];
+  let current = "";
+  for (const word of words) {
+    if (!word) continue;
+    if (current.length === 0) {
+      current = word;
+    } else if (current.length + 1 + word.length <= maxWidth) {
+      current += " " + word;
+    } else {
+      result.push(current);
+      current = word;
+    }
+  }
+  if (current) result.push(current);
+  return result.length > 0 ? result : [text];
+}
+
+/** Wrap one ANSI-aware line to width, re-applying any leading SGR prefix. */
+function wrapLine(line: string, width: number): string[] {
+  const plain = stripAnsi(line);
+  if (plain.length <= width) return [line];
+  const { prefix } = extractAnsiPrefix(line);
+  const wrappedLines = wrapPlainText(plain, width);
+  return wrappedLines.map((l) => prefix + l);
+}
+
 export function makeComponent(lines: string[]) {
   return {
     render(width: number): string[] {
       const cap = Math.max(1, width - 2);
-      return lines.map((l) => truncateLineToWidth(l, cap));
+      const output: string[] = [];
+      for (const line of lines) {
+        const sanitized = sanitizeLongTokens(line);
+        for (const wrapped of wrapLine(sanitized, cap)) {
+          output.push(wrapped);
+        }
+      }
+      return output;
     },
     invalidate() {},
   };
