@@ -2,6 +2,16 @@
 
 All notable changes to little-coder are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and little-coder's public interface (CLI, providers, tools, skills) follows semver starting at `v0.0.1` post-rename.
 
+## [v1.9.3] — 2026-06-18
+
+### Added
+- **`LITTLE_CODER_EXTRA_EXTENSIONS` env var: layer third-party pi extensions onto the bundled set without forking the installed package** ([#46](https://github.com/itayinbarr/little-coder/issues/46)). Path-delimited list (`:` on POSIX, `;` on Windows — `node:path.delimiter`) of extension paths. Each entry can be a direct file (e.g. a `pi-ponytail`-style `extensions/ponytail.js`) or a directory containing `index.ts` / `index.js` (the launcher prefers `.ts`). A leading `~/` is expanded; missing paths log a one-line warning to stderr and are skipped (a typo in the env var doesn't kill the session). Survives upgrades — drop the env var into your shell rc once and every `little-coder` run picks up the extras. Example: `LITTLE_CODER_EXTRA_EXTENSIONS=~/.local/lib/node_modules/pi-ponytail/extensions/ponytail.js little-coder`. Parsing rules live in `bin/extras.mjs` so they're unit-testable in isolation (9 cases covering direct-file / dir-index-resolution / `index.ts`-preference / missing-path warning / `~/` expansion / multiple entries / whitespace trimming). The launcher-level integration is exercised end-to-end (warning prints for a bad path; valid paths pass through silently to pi as `--extension <entry>` flags). Closest siblings — third-party skill bundles — are not yet covered; `skill-inject` still discovers only `<pkgRoot>/skills/tools/*.md`, and a follow-up will add the same kind of override.
+
+### Notes for upgraders
+- No CLI-flag or public-API changes. The new env var is opt-in: unset = identical behavior to v1.9.2. If you were carrying a custom wrapper extension inside the installed npm package (which gets wiped on upgrade), you can drop it and use the env var instead.
+
+---
+
 ## [v1.9.2] — 2026-06-18
 
 ### Fixed
